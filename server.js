@@ -9,7 +9,10 @@ var fs = require('fs');
 var express = require('express');
 var app = express();
 
+var mongodb = require('mongodb').MongoClient;
 var https = require('https');
+
+var MONGODB_URI = 'mongodb://'+process.env.USER+':'+process.env.PASS+'@'+process.env.HOST+':'+process.env.DB_PORT+'/'+process.env.DB;
 
 if (!process.env.DISABLE_XORIGIN) {
   app.use(function(req, res, next) {
@@ -49,10 +52,45 @@ app.route('/api/test/:query')
 app.route('/api/imagesearch/:query')
     .get(function(req,res){
   
+      let date = new Date().toISOString(); //used in storing search in 'recent' database
+      let searchData = {"term" : req.params.query, "when" : date};
       let offset = "1";  
       if(req.query.offset && parseInt(req.query.offset) != NaN){
         offset = req.query.offset;
       }
+  
+      /*insert search into 'recent' database and delete oldest*/
+      mongodb.connect(MONGODB_URI, function(err, mongoClient){
+        if(err){
+          res.send(err.status || 400)
+            .type('txt')
+            .send(err.message || "Could not connect to DB");
+        }
+        var db = mongoClient.db(process.env.DBNAME);
+       
+        db.collection('recent').find({}).toArray(function(err,docs){
+          
+         if(err){
+           res.send(err.status || 400)
+            .type('txt')
+            .send(err.message || "Could not connect to DB");
+          }
+         
+          docs.sort((a,b) => {
+            if(a.when < b.when)
+              return -1;
+            if(a.when > b.when)
+              return 1;
+            return 0;
+          })
+         
+          console.log(docs[0].when);
+          console.log(docs[0].term);
+          db.collection('recent').deleteOne({"when": docs[0].when});
+        });
+        db.collection('recent').insertOne(searchData);
+      });
+  
   
       var url = "https://www.googleapis.com/customsearch/v1?" + 
           "num=" + 10 +
@@ -61,7 +99,7 @@ app.route('/api/imagesearch/:query')
           "&start=" + offset +
           "&cx=" + process.env.CSE_ID + 
           "&key=" + process.env.API_KEY +
-          "&fields=items(title,link,snippet,image/thumbnailLink)";
+          "&fields=items(title,link,snippet)";
       
       var request = https.request(url, (response) => {
         let block = [];
@@ -75,7 +113,7 @@ app.route('/api/imagesearch/:query')
               "title" : results.items[i].title,
               "link" : results.items[i].link,
               "snippet" : results.items[i].snippet,
-              "thumbnail" : results.items[i].image.thumbnailLink
+              //"thumbnail" : results.items[i].image.thumbnailLink //sometimes image is not returned?
             });
           }
           res.send({images});
@@ -85,6 +123,28 @@ app.route('/api/imagesearch/:query')
       });
     }).end();
 });
+
+app.route('/api/latest')
+  .get(function(req,res){
+  //{term: term-searched-for, when: datetime-searched-for}, max 10 results
+  mongodb.connect(MONGODB_URI, function(err, mongoClient){
+      if(err){
+        res.send(err.status || 400)
+          .type('txt')
+          .send(err.message || "Could not connect to DB");
+      }
+      var db = mongoClient.db(process.env.DBNAME);
+      db.collection('recent').find({},{projection: { _id: false}}).toArray(function(err,docs){
+        if(err) {
+          res.send(err.status || 400)
+            .type('txt')
+            .send(err.message || "Could not connect to DB");
+        } 
+        res.send(docs);
+      });
+    });
+  });
+
 
 // Respond not found to all the wrong routes
 app.use(function(req, res, next){
